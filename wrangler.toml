@@ -1,0 +1,19 @@
+name = "pharma-license-backend"
+main = "src/index.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ─── D1 Database ────────────────────────────────────────────────────────────
+[[d1_databases]]
+binding = "DB"
+database_name = "pharma-license-db"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+# ─── Environment Variables (set these in Cloudflare dashboard too) ───────────
+[vars]
+ADMIN_EMAIL = "madevstudiox@gmail.com"
+CORS_ORIGIN = "https://pharma-license-dashboard.vercel.app"
+
+# ─── Secrets (set via: wrangler secret put SECRET_NAME) ─────────────────────
+# ADMIN_PASSWORD_HASH  — sha256 hash of your admin password
+# JWT_SECRET           — random 64-char string for JWT signing
