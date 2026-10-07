@@ -203,7 +203,15 @@ async function grantTrial(hwid, env) {
   if (!existing) return errorResponse(404, 'Machine not found');
   const expiry = Date.now() + (7 * 86400000);
   await env.DB.prepare("UPDATE machines SET status='trial', license_expiry=?, is_permanent=0 WHERE hwid=?").bind(expiry, hwid).run();
-  await logAction(hwid, 'trial', '7-day trial granted', env);
+  // Unlock ALL features for trial period
+  await env.DB.prepare(`
+    INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync)
+    VALUES (?,1,1,1,1,1,1,1,1,1)
+    ON CONFLICT(hwid) DO UPDATE SET
+      mobile_app=1, cloud_backup=1, reports=1, purchases=1,
+      expenses=1, returns_module=1, suppliers=1, multi_user=1, lan_sync=1
+  `).bind(hwid).run();
+  await logAction(hwid, 'trial', '7-day trial granted — all features unlocked', env);
   return jsonResponse({ success: true, message: '7-day trial granted', expiry_date: expiry });
 }
 
@@ -363,6 +371,15 @@ async function handleTrialAction(id, action, env) {
           .bind(req.hwid, req.shop_name, req.phone, expiry, now, now).run();
         await env.DB.prepare("INSERT INTO machine_features (hwid) VALUES (?)").bind(req.hwid).run();
       }
+
+      // Unlock ALL features for trial period
+      await env.DB.prepare(`
+        INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync)
+        VALUES (?,1,1,1,1,1,1,1,1,1)
+        ON CONFLICT(hwid) DO UPDATE SET
+          mobile_app=1, cloud_backup=1, reports=1, purchases=1,
+          expenses=1, returns_module=1, suppliers=1, multi_user=1, lan_sync=1
+      `).bind(req.hwid).run();
 
       await env.DB.prepare("UPDATE trial_requests SET status='approved', resolved_at=? WHERE id=?")
         .bind(Date.now(), parseInt(id)).run();
