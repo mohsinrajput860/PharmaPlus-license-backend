@@ -400,6 +400,67 @@ async function handleTrialAction(id, action, env) {
   }
 }
 
+// ── Pricing / Packages CRUD ───────────────────────────────────────────────────
+async function ensurePricingTable(env) {
+  await env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS pricing_packages (
+      id          INTEGER PRIMARY KEY AUTOINCREMENT,
+      name        TEXT NOT NULL,
+      price       INTEGER NOT NULL,
+      duration    TEXT NOT NULL,
+      description TEXT DEFAULT '',
+      is_popular  INTEGER DEFAULT 0,
+      is_active   INTEGER DEFAULT 1,
+      sort_order  INTEGER DEFAULT 0,
+      created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+      updated_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+    )
+  `).run();
+}
+
+async function listPricing(env) {
+  try {
+    await ensurePricingTable(env);
+    const rows = await env.DB.prepare(
+      'SELECT * FROM pricing_packages ORDER BY sort_order ASC, created_at ASC'
+    ).all();
+    return jsonResponse({ success: true, packages: rows.results });
+  } catch (err) { return errorResponse(500, err.message); }
+}
+
+async function createPricing(request, env) {
+  try {
+    await ensurePricingTable(env);
+    const { name, price, duration, description, is_popular, sort_order } = await parseBody(request);
+    if (!name?.trim()) return errorResponse(400, 'Package name required');
+    if (!price || isNaN(price)) return errorResponse(400, 'Valid price required');
+    if (!duration?.trim()) return errorResponse(400, 'Duration required');
+    const now = Date.now();
+    const result = await env.DB.prepare(
+      'INSERT INTO pricing_packages (name, price, duration, description, is_popular, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
+    ).bind(name.trim(), parseInt(price), duration.trim(), description?.trim() || '', is_popular ? 1 : 0, sort_order || 0, now, now).run();
+    return jsonResponse({ success: true, id: result.meta.last_row_id, message: 'Package created' });
+  } catch (err) { return errorResponse(500, err.message); }
+}
+
+async function updatePricing(id, request, env) {
+  try {
+    await ensurePricingTable(env);
+    const { name, price, duration, description, is_popular, is_active, sort_order } = await parseBody(request);
+    await env.DB.prepare(
+      'UPDATE pricing_packages SET name=COALESCE(?,name), price=COALESCE(?,price), duration=COALESCE(?,duration), description=COALESCE(?,description), is_popular=COALESCE(?,is_popular), is_active=COALESCE(?,is_active), sort_order=COALESCE(?,sort_order), updated_at=? WHERE id=?'
+    ).bind(name?.trim()||null, price?parseInt(price):null, duration?.trim()||null, description?.trim()??null, is_popular!=null?( is_popular?1:0):null, is_active!=null?(is_active?1:0):null, sort_order!=null?sort_order:null, Date.now(), parseInt(id)).run();
+    return jsonResponse({ success: true, message: 'Package updated' });
+  } catch (err) { return errorResponse(500, err.message); }
+}
+
+async function deletePricing(id, env) {
+  try {
+    await env.DB.prepare('DELETE FROM pricing_packages WHERE id=?').bind(parseInt(id)).run();
+    return jsonResponse({ success: true, message: 'Package deleted' });
+  } catch (err) { return errorResponse(500, err.message); }
+}
+
 // ── Main Router ───────────────────────────────────────────────────────────────
 export default {
   async fetch(request, env, ctx) {
@@ -415,6 +476,8 @@ export default {
       if (path === '/api/license/ping'          && method === 'POST') return withCors(await handlePing(request, env), env, path);
       if (path === '/api/license/trial-request' && method === 'POST') return withCors(await handleTrialRequest(request, env), env, path);
       if (path === '/api/health')                                      return withCors(jsonResponse({ status: 'ok', service: 'pharma-license-api', ts: Date.now() }), env, path);
+      // Public pricing — desktop app reads this
+      if (path === '/api/pricing'               && method === 'GET')  return withCors(await listPricing(env), env, path);
 
       // Admin login
       if (path === '/api/admin/login' && method === 'POST') return withCors(await handleAdminLogin(request, env), env);
@@ -426,6 +489,13 @@ export default {
 
         if (path === '/api/admin/stats' && method === 'GET') return withCors(await getStats(env), env);
         if (path === '/api/admin/machines' && method === 'GET') return withCors(await listMachines(request, env), env);
+
+        // Pricing packages CRUD
+        if (path === '/api/admin/pricing' && method === 'GET')  return withCors(await listPricing(env), env);
+        if (path === '/api/admin/pricing' && method === 'POST') return withCors(await createPricing(request, env), env);
+        const pricingMatch = path.match(/^\/api\/admin\/pricing\/(\d+)$/);
+        if (pricingMatch && method === 'PUT')    return withCors(await updatePricing(pricingMatch[1], request, env), env);
+        if (pricingMatch && method === 'DELETE') return withCors(await deletePricing(pricingMatch[1], env), env);
 
         // Trial requests
         if (path === '/api/admin/trial-requests' && method === 'GET')  return withCors(await listTrialRequests(request, env), env);
