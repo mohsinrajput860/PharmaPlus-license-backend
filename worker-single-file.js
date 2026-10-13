@@ -112,6 +112,18 @@ async function verifyAdminJWT(request, env) {
   return { valid: true, payload };
 }
 
+async function handleAdminLogout(request, env) {
+  const auth  = request.headers.get('Authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (token && env.JWT_SECRET) {
+    try {
+      const tokenHash = await sha256(token);
+      await env.DB.prepare('UPDATE admin_sessions SET revoked=1 WHERE token_hash=?').bind(tokenHash).run();
+    } catch { /* silent */ }
+  }
+  return jsonResponse({ success: true, message: 'Logged out' });
+}
+
 // ── License public handlers ───────────────────────────────────────────────────
 async function handleVerify(request, env) {
   const { hwid, app_version } = await parseBody(request);
@@ -253,7 +265,7 @@ async function getMachineLogs(hwid, env) {
 
 async function getStats(env) {
   const now = Date.now();
-  const [total, active, trial, revoked, inactive, expiring, recentReg, recentActive, pendingTrials] = await Promise.all([
+  const [total, active, trial, revoked, inactive, expiring, recentReg, recentActive, pendingTrials, expiredTrials] = await Promise.all([
     env.DB.prepare("SELECT COUNT(*) as c FROM machines").first(),
     env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status='active'").first(),
     env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status='trial'").first(),
@@ -263,8 +275,9 @@ async function getStats(env) {
     env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE created_at > ?").bind(now-604800000).first(),
     env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE last_seen > ?").bind(now-86400000).first(),
     env.DB.prepare("SELECT COUNT(*) as c FROM trial_requests WHERE status='pending'").first().catch(()=>({c:0})),
+    env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status='inactive' AND license_expiry IS NOT NULL AND license_expiry < ?").bind(now).first(),
   ]);
-  return jsonResponse({ success: true, stats: { total: total?.c||0, active: active?.c||0, trial: trial?.c||0, revoked: revoked?.c||0, inactive: inactive?.c||0, expiring_soon: expiring?.c||0, recent_reg_7d: recentReg?.c||0, active_24h: recentActive?.c||0, pending_trial_requests: pendingTrials?.c||0 } });
+  return jsonResponse({ success: true, stats: { total: total?.c||0, active: active?.c||0, trial: trial?.c||0, revoked: revoked?.c||0, inactive: inactive?.c||0, expiring_soon: expiring?.c||0, recent_reg_7d: recentReg?.c||0, active_24h: recentActive?.c||0, pending_trial_requests: pendingTrials?.c||0, expired_trials: expiredTrials?.c||0 } });
 }
 
 // ── Trial Request handlers ────────────────────────────────────────────────────
@@ -488,8 +501,9 @@ export default {
       // Public pricing — desktop app reads this
       if (path === '/api/pricing'               && method === 'GET')  return withCors(await listPricing(env), env, path);
 
-      // Admin login
-      if (path === '/api/admin/login' && method === 'POST') return withCors(await handleAdminLogin(request, env), env);
+      // Admin login / logout
+      if (path === '/api/admin/login'  && method === 'POST') return withCors(await handleAdminLogin(request, env), env);
+      if (path === '/api/admin/logout' && method === 'POST') return withCors(await handleAdminLogout(request, env), env);
 
       // Protected admin routes
       if (path.startsWith('/api/admin/')) {

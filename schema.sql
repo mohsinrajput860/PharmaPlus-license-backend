@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS machines (
   last_seen       INTEGER,
   app_version     TEXT    DEFAULT '',
   open_count      INTEGER NOT NULL DEFAULT 0,
-  notes           TEXT    DEFAULT ''
+  notes           TEXT    DEFAULT '',
+  backup_email    TEXT    DEFAULT NULL                   -- Google Drive connected email
 );
 
 -- Feature flags per machine
@@ -61,3 +62,32 @@ CREATE INDEX IF NOT EXISTS idx_machines_hwid    ON machines (hwid);
 CREATE INDEX IF NOT EXISTS idx_machines_status  ON machines (status);
 CREATE INDEX IF NOT EXISTS idx_logs_hwid        ON license_logs (hwid);
 CREATE INDEX IF NOT EXISTS idx_logs_created     ON license_logs (created_at DESC);
+
+-- Trial requests (from desktop app free trial form)
+CREATE TABLE IF NOT EXISTS trial_requests (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  hwid        TEXT NOT NULL,
+  phone       TEXT NOT NULL,
+  shop_name   TEXT DEFAULT '',
+  app_version TEXT DEFAULT '',
+  status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  resolved_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_trial_requests_status ON trial_requests (status);
+CREATE INDEX IF NOT EXISTS idx_trial_requests_hwid   ON trial_requests (hwid);
+
+-- Pricing packages (managed from admin dashboard)
+CREATE TABLE IF NOT EXISTS pricing_packages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL,
+  price       INTEGER NOT NULL,
+  duration    TEXT NOT NULL,
+  description TEXT DEFAULT '',
+  is_popular  INTEGER DEFAULT 0,
+  is_active   INTEGER DEFAULT 1,
+  sort_order  INTEGER DEFAULT 0,
+  created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
+  updated_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000)
+);
