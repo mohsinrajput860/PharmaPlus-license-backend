@@ -124,10 +124,12 @@ async function handleVerify(request, env) {
     await env.DB.prepare("UPDATE machines SET status='inactive' WHERE hwid=?").bind(hwid).run();
     return jsonResponse({ authorized: false, reason: 'EXPIRED', shop_name: machine.shop_name, expiry_date: machine.license_expiry, features: defaultFeatures() });
   }
+  // Ensure backup_email column exists (migration)
+  try { await env.DB.prepare('ALTER TABLE machines ADD COLUMN backup_email TEXT DEFAULT NULL').run(); } catch (e) {}
   const featRow = await env.DB.prepare('SELECT * FROM machine_features WHERE hwid = ?').bind(hwid).first();
   const features = featRow ? { mobile_app: featRow.mobile_app, cloud_backup: featRow.cloud_backup, reports: featRow.reports, purchases: featRow.purchases, expenses: featRow.expenses, returns_module: featRow.returns_module, suppliers: featRow.suppliers, multi_user: featRow.multi_user, lan_sync: featRow.lan_sync } : defaultFeatures();
   await env.DB.prepare('UPDATE machines SET last_seen=?, open_count=open_count+1, app_version=? WHERE hwid=?').bind(Date.now(), app_version || '', hwid).run();
-  return jsonResponse({ authorized: true, status: machine.status, shop_name: machine.shop_name, is_permanent: machine.is_permanent === 1, expiry_date: machine.license_expiry, features });
+  return jsonResponse({ authorized: true, status: machine.status, shop_name: machine.shop_name, is_permanent: machine.is_permanent === 1, expiry_date: machine.license_expiry, backup_email: machine.backup_email || null, features });
 }
 async function handleRegister(request, env) {
   const { hwid, shop_name, owner_name, phone, city, app_version } = await parseBody(request);
@@ -141,9 +143,15 @@ async function handleRegister(request, env) {
   return jsonResponse({ success: true, already_registered: false, status: 'inactive' });
 }
 async function handlePing(request, env) {
-  const { hwid, app_version } = await parseBody(request);
+  const { hwid, app_version, backup_email } = await parseBody(request);
   if (!hwid) return errorResponse(400, 'HWID required');
-  await env.DB.prepare('UPDATE machines SET last_seen=?, app_version=COALESCE(?,app_version) WHERE hwid=?').bind(Date.now(), app_version||null, hwid).run();
+  // Ensure backup_email column exists (migration)
+  try {
+    await env.DB.prepare('ALTER TABLE machines ADD COLUMN backup_email TEXT DEFAULT NULL').run();
+  } catch (e) { /* column already exists — ignore */ }
+  await env.DB.prepare(
+    'UPDATE machines SET last_seen=?, app_version=COALESCE(?,app_version), backup_email=COALESCE(NULLIF(?,\'\'),backup_email) WHERE hwid=?'
+  ).bind(Date.now(), app_version||null, backup_email||'', hwid).run();
   return jsonResponse({ success: true });
 }
 
@@ -172,6 +180,7 @@ async function listMachines(request, env) {
 }
 
 async function getMachine(hwid, env) {
+  try { await env.DB.prepare('ALTER TABLE machines ADD COLUMN backup_email TEXT DEFAULT NULL').run(); } catch (e) {}
   const machine = await env.DB.prepare('SELECT m.*, mf.mobile_app, mf.cloud_backup, mf.reports, mf.purchases, mf.expenses, mf.returns_module, mf.suppliers, mf.multi_user, mf.lan_sync FROM machines m LEFT JOIN machine_features mf ON m.hwid=mf.hwid WHERE m.hwid=?').bind(hwid).first();
   if (!machine) return errorResponse(404, 'Machine not found');
   const logs = await env.DB.prepare('SELECT * FROM license_logs WHERE hwid=? ORDER BY created_at DESC LIMIT 20').bind(hwid).all();
