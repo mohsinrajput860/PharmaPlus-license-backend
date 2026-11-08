@@ -224,15 +224,15 @@ async function grantTrial(hwid, env) {
   if (!existing) return errorResponse(404, 'Machine not found');
   const expiry = Date.now() + (7 * 86400000);
   await env.DB.prepare("UPDATE machines SET status='trial', license_expiry=?, is_permanent=0 WHERE hwid=?").bind(expiry, hwid).run();
-  // Unlock ALL features for trial period
+  // Trial: core features ON, cloud_backup + multi_user + lan_sync OFF
   await env.DB.prepare(`
     INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync)
-    VALUES (?,1,1,1,1,1,1,1,1,1)
+    VALUES (?,1,0,1,1,1,1,1,0,0)
     ON CONFLICT(hwid) DO UPDATE SET
-      mobile_app=1, cloud_backup=1, reports=1, purchases=1,
-      expenses=1, returns_module=1, suppliers=1, multi_user=1, lan_sync=1
+      mobile_app=1, cloud_backup=0, reports=1, purchases=1,
+      expenses=1, returns_module=1, suppliers=1, multi_user=0, lan_sync=0
   `).bind(hwid).run();
-  await logAction(hwid, 'trial', '7-day trial granted — all features unlocked', env);
+  await logAction(hwid, 'trial', '7-day trial granted — core features unlocked (cloud backup, multi-user & LAN sync excluded)', env);
   return jsonResponse({ success: true, message: '7-day trial granted', expiry_date: expiry });
 }
 
@@ -295,6 +295,8 @@ async function handleTrialRequest(request, env) {
         hwid        TEXT NOT NULL,
         phone       TEXT NOT NULL,
         shop_name   TEXT DEFAULT '',
+        owner_name  TEXT DEFAULT '',
+        city        TEXT DEFAULT '',
         app_version TEXT DEFAULT '',
         status      TEXT NOT NULL DEFAULT 'pending',
         created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),
@@ -319,8 +321,8 @@ async function handleTrialRequest(request, env) {
 
     // Insert request
     await env.DB.prepare(
-      "INSERT INTO trial_requests (hwid, phone, shop_name, app_version) VALUES (?, ?, ?, ?)"
-    ).bind(hwid, phone.trim(), shop_name || 'Unknown Store', app_version || '').run();
+      "INSERT INTO trial_requests (hwid, phone, shop_name, owner_name, city, app_version) VALUES (?, ?, ?, ?, ?, ?)"
+    ).bind(hwid, phone.trim(), shop_name || 'Unknown Store', owner_name || '', city || '', app_version || '').run();
 
     // Also register/update machine record
     const machineExists = await env.DB.prepare('SELECT hwid FROM machines WHERE hwid = ?').bind(hwid).first();
@@ -354,15 +356,16 @@ async function listTrialRequests(request, env) {
     await env.DB.prepare(`
       CREATE TABLE IF NOT EXISTS trial_requests (
         id INTEGER PRIMARY KEY AUTOINCREMENT, hwid TEXT NOT NULL, phone TEXT NOT NULL,
-        shop_name TEXT DEFAULT '', app_version TEXT DEFAULT '',
+        shop_name TEXT DEFAULT '', owner_name TEXT DEFAULT '', city TEXT DEFAULT '',
+        app_version TEXT DEFAULT '',
         status TEXT NOT NULL DEFAULT 'pending',
         created_at INTEGER NOT NULL DEFAULT (unixepoch() * 1000), resolved_at INTEGER
       )
     `).run();
 
     const q = status === 'all'
-      ? "SELECT tr.*, m.city, m.owner_name FROM trial_requests tr LEFT JOIN machines m ON tr.hwid=m.hwid ORDER BY tr.created_at DESC LIMIT 50"
-      : "SELECT tr.*, m.city, m.owner_name FROM trial_requests tr LEFT JOIN machines m ON tr.hwid=m.hwid WHERE tr.status=? ORDER BY tr.created_at DESC LIMIT 50";
+      ? "SELECT tr.*, COALESCE(tr.city, m.city) as city, COALESCE(tr.owner_name, m.owner_name) as owner_name FROM trial_requests tr LEFT JOIN machines m ON tr.hwid=m.hwid ORDER BY tr.created_at DESC LIMIT 50"
+      : "SELECT tr.*, COALESCE(tr.city, m.city) as city, COALESCE(tr.owner_name, m.owner_name) as owner_name FROM trial_requests tr LEFT JOIN machines m ON tr.hwid=m.hwid WHERE tr.status=? ORDER BY tr.created_at DESC LIMIT 50";
 
     const rows = status === 'all'
       ? await env.DB.prepare(q).all()
@@ -389,23 +392,23 @@ async function handleTrialAction(id, action, env) {
           .bind(expiry, req.phone, req.hwid).run();
       } else {
         const now = Date.now();
-        await env.DB.prepare("INSERT INTO machines (hwid, shop_name, phone, status, license_expiry, is_permanent, created_at, last_seen) VALUES (?,?,?,'trial',?,0,?,?)")
-          .bind(req.hwid, req.shop_name, req.phone, expiry, now, now).run();
+        await env.DB.prepare("INSERT INTO machines (hwid, shop_name, owner_name, phone, city, status, license_expiry, is_permanent, created_at, last_seen) VALUES (?,?,?,?,?,'trial',?,0,?,?)")
+          .bind(req.hwid, req.shop_name, req.owner_name || '', req.phone, req.city || '', expiry, now, now).run();
         await env.DB.prepare("INSERT INTO machine_features (hwid) VALUES (?)").bind(req.hwid).run();
       }
 
-      // Unlock ALL features for trial period
+      // Trial: core features ON, cloud_backup + multi_user + lan_sync OFF
       await env.DB.prepare(`
         INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync)
-        VALUES (?,1,1,1,1,1,1,1,1,1)
+        VALUES (?,1,0,1,1,1,1,1,0,0)
         ON CONFLICT(hwid) DO UPDATE SET
-          mobile_app=1, cloud_backup=1, reports=1, purchases=1,
-          expenses=1, returns_module=1, suppliers=1, multi_user=1, lan_sync=1
+          mobile_app=1, cloud_backup=0, reports=1, purchases=1,
+          expenses=1, returns_module=1, suppliers=1, multi_user=0, lan_sync=0
       `).bind(req.hwid).run();
 
       await env.DB.prepare("UPDATE trial_requests SET status='approved', resolved_at=? WHERE id=?")
         .bind(Date.now(), parseInt(id)).run();
-      await env.DB.prepare("INSERT INTO license_logs (hwid, action, detail) VALUES (?,'trial','7-day trial approved via request. Phone: '||?)")
+      await env.DB.prepare("INSERT INTO license_logs (hwid, action, detail) VALUES (?,'trial','7-day trial approved via request (core features only). Phone: '||?)")
         .bind(req.hwid, req.phone).run();
 
       return jsonResponse({ success: true, message: 'Trial approved. Machine will unlock on next app startup.' });
@@ -453,14 +456,14 @@ async function listPricing(env) {
 async function createPricing(request, env) {
   try {
     await ensurePricingTable(env);
-    const { name, price, duration, description, is_popular, sort_order } = await parseBody(request);
+    const { name, price, duration, description, is_popular, is_active, sort_order } = await parseBody(request);
     if (!name?.trim()) return errorResponse(400, 'Package name required');
     if (!price || isNaN(price)) return errorResponse(400, 'Valid price required');
     if (!duration?.trim()) return errorResponse(400, 'Duration required');
     const now = Date.now();
     const result = await env.DB.prepare(
-      'INSERT INTO pricing_packages (name, price, duration, description, is_popular, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)'
-    ).bind(name.trim(), parseInt(price), duration.trim(), description?.trim() || '', is_popular ? 1 : 0, sort_order || 0, now, now).run();
+      'INSERT INTO pricing_packages (name, price, duration, description, is_popular, is_active, sort_order, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)'
+    ).bind(name.trim(), parseInt(price), duration.trim(), description?.trim() || '', is_popular ? 1 : 0, is_active !== false ? 1 : 0, sort_order || 0, now, now).run();
     return jsonResponse({ success: true, id: result.meta.last_row_id, message: 'Package created' });
   } catch (err) { return errorResponse(500, err.message); }
 }
@@ -502,49 +505,49 @@ export default {
       if (path === '/api/pricing'               && method === 'GET')  return withCors(await listPricing(env), env, path);
 
       // Admin login / logout
-      if (path === '/api/admin/login'  && method === 'POST') return withCors(await handleAdminLogin(request, env), env);
-      if (path === '/api/admin/logout' && method === 'POST') return withCors(await handleAdminLogout(request, env), env);
+      if (path === '/api/admin/login'  && method === 'POST') return withCors(await handleAdminLogin(request, env), env, path);
+      if (path === '/api/admin/logout' && method === 'POST') return withCors(await handleAdminLogout(request, env), env, path);
 
       // Protected admin routes
       if (path.startsWith('/api/admin/')) {
         const auth = await verifyAdminJWT(request, env);
-        if (!auth.valid) return withCors(errorResponse(401, 'Unauthorized'), env);
+        if (!auth.valid) return withCors(errorResponse(401, 'Unauthorized'), env, path);
 
-        if (path === '/api/admin/stats' && method === 'GET') return withCors(await getStats(env), env);
-        if (path === '/api/admin/machines' && method === 'GET') return withCors(await listMachines(request, env), env);
+        if (path === '/api/admin/stats' && method === 'GET') return withCors(await getStats(env), env, path);
+        if (path === '/api/admin/machines' && method === 'GET') return withCors(await listMachines(request, env), env, path);
 
         // Pricing packages CRUD
-        if (path === '/api/admin/pricing' && method === 'GET')  return withCors(await listPricing(env), env);
-        if (path === '/api/admin/pricing' && method === 'POST') return withCors(await createPricing(request, env), env);
+        if (path === '/api/admin/pricing' && method === 'GET')  return withCors(await listPricing(env), env, path);
+        if (path === '/api/admin/pricing' && method === 'POST') return withCors(await createPricing(request, env), env, path);
         const pricingMatch = path.match(/^\/api\/admin\/pricing\/(\d+)$/);
-        if (pricingMatch && method === 'PUT')    return withCors(await updatePricing(pricingMatch[1], request, env), env);
-        if (pricingMatch && method === 'DELETE') return withCors(await deletePricing(pricingMatch[1], env), env);
+        if (pricingMatch && method === 'PUT')    return withCors(await updatePricing(pricingMatch[1], request, env), env, path);
+        if (pricingMatch && method === 'DELETE') return withCors(await deletePricing(pricingMatch[1], env), env, path);
 
         // Trial requests
-        if (path === '/api/admin/trial-requests' && method === 'GET')  return withCors(await listTrialRequests(request, env), env);
+        if (path === '/api/admin/trial-requests' && method === 'GET')  return withCors(await listTrialRequests(request, env), env, path);
         const trialMatch = path.match(/^\/api\/admin\/trial-requests\/(\d+)\/(approve|reject)$/);
-        if (trialMatch && method === 'POST') return withCors(await handleTrialAction(trialMatch[1], trialMatch[2], env), env);
+        if (trialMatch && method === 'POST') return withCors(await handleTrialAction(trialMatch[1], trialMatch[2], env), env, path);
 
         const m = path.match(/^\/api\/admin\/machines\/([^/]+)(\/.*)?$/);
         if (m) {
           const hwid = decodeURIComponent(m[1]);
           const sub  = m[2] || '';
-          if (sub===''          && method==='GET')    return withCors(await getMachine(hwid, env), env);
-          if (sub===''          && method==='PUT')    return withCors(await updateMachine(hwid, request, env), env);
-          if (sub===''          && method==='DELETE') return withCors(await deleteMachine(hwid, env), env);
-          if (sub==='/authorize'&& method==='POST')   return withCors(await authorizeMachine(hwid, request, env), env);
-          if (sub==='/revoke'   && method==='POST')   return withCors(await revokeMachine(hwid, env), env);
-          if (sub==='/trial'    && method==='POST')   return withCors(await grantTrial(hwid, env), env);
-          if (sub==='/features' && method==='PUT')    return withCors(await updateFeatures(hwid, request, env), env);
-          if (sub==='/logs'     && method==='GET')    return withCors(await getMachineLogs(hwid, env), env);
+          if (sub===''          && method==='GET')    return withCors(await getMachine(hwid, env), env, path);
+          if (sub===''          && method==='PUT')    return withCors(await updateMachine(hwid, request, env), env, path);
+          if (sub===''          && method==='DELETE') return withCors(await deleteMachine(hwid, env), env, path);
+          if (sub==='/authorize'&& method==='POST')   return withCors(await authorizeMachine(hwid, request, env), env, path);
+          if (sub==='/revoke'   && method==='POST')   return withCors(await revokeMachine(hwid, env), env, path);
+          if (sub==='/trial'    && method==='POST')   return withCors(await grantTrial(hwid, env), env, path);
+          if (sub==='/features' && method==='PUT')    return withCors(await updateFeatures(hwid, request, env), env, path);
+          if (sub==='/logs'     && method==='GET')    return withCors(await getMachineLogs(hwid, env), env, path);
         }
-        return withCors(errorResponse(404, 'Not found'), env);
+        return withCors(errorResponse(404, 'Not found'), env, path);
       }
 
-      return withCors(errorResponse(404, 'Not found'), env);
+      return withCors(errorResponse(404, 'Not found'), env, path);
     } catch (err) {
       console.error('Error:', err);
-      return withCors(errorResponse(500, 'Internal error: ' + err.message), env);
+      return withCors(errorResponse(500, 'Internal error: ' + err.message), env, path);
     }
   }
 };

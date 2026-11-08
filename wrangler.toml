@@ -1,5 +1,5 @@
 name = "pharma-license-backend"
-main = "src/index.js"
+main = "worker-single-file.js"
 compatibility_date = "2024-11-01"
 compatibility_flags = ["nodejs_compat"]
 

@@ -185,7 +185,16 @@ export async function grantTrial(hwid, env) {
       "UPDATE machines SET status = 'trial', license_expiry = ?, is_permanent = 0 WHERE hwid = ?"
     ).bind(expiry, hwid).run();
 
-    await logAction(hwid, 'trial', `7-day trial granted (expires: ${new Date(expiry).toLocaleDateString('en-PK')})`, env);
+    // Trial: core features ON, cloud_backup / multi_user / lan_sync OFF
+    await env.DB.prepare(`
+      INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync)
+      VALUES (?,1,0,1,1,1,1,1,0,0)
+      ON CONFLICT(hwid) DO UPDATE SET
+        mobile_app=1, cloud_backup=0, reports=1, purchases=1,
+        expenses=1, returns_module=1, suppliers=1, multi_user=0, lan_sync=0
+    `).bind(hwid).run();
+
+    await logAction(hwid, 'trial', `7-day trial granted — core features only (expires: ${new Date(expiry).toLocaleDateString('en-PK')})`, env);
 
     return jsonResponse({
       success: true,
@@ -284,18 +293,30 @@ export async function getStats(env) {
       "SELECT COUNT(*) as c FROM machines WHERE last_seen > ?"
     ).bind(now - 24 * 60 * 60 * 1000).first();
 
+    // Pending trial requests
+    const pendingTrials = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM trial_requests WHERE status = 'pending'"
+    ).first().catch(() => ({ c: 0 }));
+
+    // Expired trials — machines that had trial status and are now inactive with past expiry
+    const expiredTrials = await env.DB.prepare(
+      "SELECT COUNT(*) as c FROM machines WHERE status = 'inactive' AND license_expiry IS NOT NULL AND license_expiry < ?"
+    ).bind(now).first().catch(() => ({ c: 0 }));
+
     return jsonResponse({
       success: true,
       stats: {
-        total:           total?.c || 0,
-        active:          active?.c || 0,
-        trial:           trial?.c || 0,
-        expired:         expired?.c || 0,
-        revoked:         revoked?.c || 0,
-        inactive:        inactive?.c || 0,
-        expiring_soon:   expiringSoon?.c || 0,
-        recent_reg_7d:   recentReg?.c || 0,
-        active_24h:      recentActive?.c || 0,
+        total:                   total?.c           || 0,
+        active:                  active?.c          || 0,
+        trial:                   trial?.c           || 0,
+        expired:                 expired?.c         || 0,
+        revoked:                 revoked?.c         || 0,
+        inactive:                inactive?.c        || 0,
+        expiring_soon:           expiringSoon?.c    || 0,
+        recent_reg_7d:           recentReg?.c       || 0,
+        active_24h:              recentActive?.c    || 0,
+        pending_trial_requests:  pendingTrials?.c   || 0,
+        expired_trials:          expiredTrials?.c   || 0,
       }
     });
   } catch (err) {
