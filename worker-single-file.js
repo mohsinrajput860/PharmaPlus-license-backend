@@ -19,6 +19,7 @@ const PUBLIC_PATHS = [
   '/api/license/register',
   '/api/license/ping',
   '/api/license/trial-request',
+  '/api/license/report-feature-change',
   '/api/health',
 ];
 
@@ -168,8 +169,14 @@ async function handlePing(request, env) {
 }
 
 // ── Admin handlers ────────────────────────────────────────────────────────────
-async function logAction(hwid, action, detail, env) {
-  try { await env.DB.prepare("INSERT INTO license_logs (hwid,action,detail,performed_by) VALUES (?,?,?,'admin')").bind(hwid, action, detail).run(); } catch {}
+
+// source: 'dashboard' | 'developer_panel' | 'admin' (default)
+async function logAction(hwid, action, detail, env, source = 'admin') {
+  try {
+    await env.DB.prepare(
+      "INSERT INTO license_logs (hwid,action,detail,performed_by) VALUES (?,?,?,?)"
+    ).bind(hwid, action, detail, source).run();
+  } catch {}
 }
 
 async function listMachines(request, env) {
@@ -189,6 +196,43 @@ async function listMachines(request, env) {
   if (status) { cq += ' AND status=?'; cp.push(status); }
   const count = await env.DB.prepare(cq).bind(...cp).first();
   return jsonResponse({ success: true, machines: result.results, total: count?.total||0, limit, offset });
+}
+
+async function handleReportFeatureChange(request, env) {
+  // Called by desktop app when DeveloperPanel changes a feature locally
+  // No admin JWT needed — authenticated by HWID (machine must be registered)
+  try {
+    const { hwid, feature, old_value, new_value } = await parseBody(request);
+    if (!hwid || hwid.length < 8) return errorResponse(400, 'Invalid HWID');
+    if (!feature) return errorResponse(400, 'feature required');
+
+    const machine = await env.DB.prepare('SELECT hwid FROM machines WHERE hwid=?').bind(hwid).first();
+    if (!machine) return errorResponse(404, 'Machine not found');
+
+    const FLAG_LABELS = {
+      mobile_app: 'Mobile App', cloud_backup: 'Cloud Backup',
+      multi_user: 'User Management',
+    };
+    const label   = FLAG_LABELS[feature] || feature;
+    const fromVal = old_value ? 'ON' : 'OFF';
+    const toVal   = new_value ? 'ON' : 'OFF';
+    const detail  = `${label}: ${fromVal} → ${toVal} (changed via Developer Panel on device)`;
+
+    // Also update machine_features so dashboard reflects the local change
+    const col = feature; // column name matches feature key
+    const allowed = ['mobile_app', 'cloud_backup', 'multi_user'];
+    if (allowed.includes(col)) {
+      await env.DB.prepare(
+        `INSERT INTO machine_features (hwid, ${col}) VALUES (?, ?)
+         ON CONFLICT(hwid) DO UPDATE SET ${col} = excluded.${col}`
+      ).bind(hwid, new_value ? 1 : 0).run();
+    }
+
+    await logAction(hwid, 'feature_updated', detail, env, 'developer_panel');
+    return jsonResponse({ success: true });
+  } catch (err) {
+    return errorResponse(500, err.message);
+  }
 }
 
 async function getMachine(hwid, env) {
@@ -240,9 +284,46 @@ async function updateFeatures(hwid, request, env) {
   const body = await parseBody(request);
   const existing = await env.DB.prepare('SELECT hwid FROM machines WHERE hwid=?').bind(hwid).first();
   if (!existing) return errorResponse(404, 'Machine not found');
-  await env.DB.prepare('INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hwid) DO UPDATE SET mobile_app=excluded.mobile_app, cloud_backup=excluded.cloud_backup, reports=excluded.reports, purchases=excluded.purchases, expenses=excluded.expenses, returns_module=excluded.returns_module, suppliers=excluded.suppliers, multi_user=excluded.multi_user, lan_sync=excluded.lan_sync')
-    .bind(hwid, body.mobile_app??1, body.cloud_backup??1, body.reports??1, body.purchases??1, body.expenses??1, body.returns_module??1, body.suppliers??1, body.multi_user??1, body.lan_sync??1).run();
-  await logAction(hwid, 'feature_updated', `Features updated`, env);
+
+  // Read BEFORE state for diff
+  const before = await env.DB.prepare('SELECT * FROM machine_features WHERE hwid=?').bind(hwid).first();
+
+  const newFlags = {
+    mobile_app:     body.mobile_app     ?? 1,
+    cloud_backup:   body.cloud_backup   ?? 1,
+    reports:        body.reports        ?? 1,
+    purchases:      body.purchases      ?? 1,
+    expenses:       body.expenses       ?? 1,
+    returns_module: body.returns_module ?? 1,
+    suppliers:      body.suppliers      ?? 1,
+    multi_user:     body.multi_user     ?? 1,
+    lan_sync:       body.lan_sync       ?? 1,
+  };
+
+  await env.DB.prepare(
+    'INSERT INTO machine_features (hwid,mobile_app,cloud_backup,reports,purchases,expenses,returns_module,suppliers,multi_user,lan_sync) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(hwid) DO UPDATE SET mobile_app=excluded.mobile_app, cloud_backup=excluded.cloud_backup, reports=excluded.reports, purchases=excluded.purchases, expenses=excluded.expenses, returns_module=excluded.returns_module, suppliers=excluded.suppliers, multi_user=excluded.multi_user, lan_sync=excluded.lan_sync'
+  ).bind(hwid, newFlags.mobile_app, newFlags.cloud_backup, newFlags.reports, newFlags.purchases, newFlags.expenses, newFlags.returns_module, newFlags.suppliers, newFlags.multi_user, newFlags.lan_sync).run();
+
+  // Build per-flag diff detail
+  const FLAG_LABELS = {
+    mobile_app: 'Mobile App', cloud_backup: 'Cloud Backup', reports: 'Reports',
+    purchases: 'Purchases', expenses: 'Expenses', returns_module: 'Returns',
+    suppliers: 'Suppliers', multi_user: 'User Management', lan_sync: 'LAN Sync',
+  };
+  const source = body._source || 'dashboard';
+  const changes = [];
+  for (const [key, label] of Object.entries(FLAG_LABELS)) {
+    const oldVal = before ? (before[key] ?? 1) : 1;
+    const newVal = newFlags[key];
+    if (Number(oldVal) !== Number(newVal)) {
+      changes.push(`${label}: ${oldVal ? 'ON' : 'OFF'} → ${newVal ? 'ON' : 'OFF'}`);
+    }
+  }
+  const detail = changes.length > 0
+    ? `Features updated via ${source}. Changes: ${changes.join(', ')}`
+    : `Features saved via ${source} (no changes)`;
+
+  await logAction(hwid, 'feature_updated', detail, env, source);
   return jsonResponse({ success: true, message: 'Feature flags updated' });
 }
 
@@ -500,6 +581,7 @@ export default {
       if (path === '/api/license/register'      && method === 'POST') return withCors(await handleRegister(request, env), env, path);
       if (path === '/api/license/ping'          && method === 'POST') return withCors(await handlePing(request, env), env, path);
       if (path === '/api/license/trial-request' && method === 'POST') return withCors(await handleTrialRequest(request, env), env, path);
+      if (path === '/api/license/report-feature-change' && method === 'POST') return withCors(await handleReportFeatureChange(request, env), env, path);
       if (path === '/api/health')                                      return withCors(jsonResponse({ status: 'ok', service: 'pharma-license-api', ts: Date.now() }), env, path);
       // Public pricing — desktop app reads this
       if (path === '/api/pricing'               && method === 'GET')  return withCors(await listPricing(env), env, path);
