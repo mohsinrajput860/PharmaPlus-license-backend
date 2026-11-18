@@ -189,3 +189,82 @@ export async function handlePing(request, env) {
     return errorResponse(500, err.message);
   }
 }
+
+// ── POST /api/license/trial-request ──────────────────────────────────────────
+export async function handleTrialRequest(request, env) {
+  const body = await parseBody(request);
+  const { hwid, phone, shop_name, owner_name, city, app_version } = body;
+
+  if (!hwid || hwid.length < 8) {
+    return errorResponse(400, 'Invalid HWID');
+  }
+  if (!phone || phone.trim().length < 7) {
+    return errorResponse(400, 'Valid phone number is required');
+  }
+
+  try {
+    // Block duplicate pending requests from same HWID
+    const existing = await env.DB.prepare(
+      "SELECT id FROM trial_requests WHERE hwid = ? AND status = 'pending'"
+    ).bind(hwid).first();
+
+    if (existing) {
+      return jsonResponse({
+        success: true,
+        already_pending: true,
+        message: 'A trial request is already pending for this device.',
+      });
+    }
+
+    const now = Date.now();
+
+    // Auto-register the machine if not already in DB (so it shows up in dashboard)
+    const machine = await env.DB.prepare(
+      'SELECT hwid FROM machines WHERE hwid = ?'
+    ).bind(hwid).first();
+
+    if (!machine) {
+      await env.DB.prepare(`
+        INSERT INTO machines (hwid, shop_name, owner_name, phone, city, status, created_at, last_seen, app_version)
+        VALUES (?, ?, ?, ?, ?, 'inactive', ?, ?, ?)
+      `).bind(
+        hwid,
+        shop_name || 'New Store',
+        owner_name || '',
+        phone || '',
+        city || '',
+        now, now,
+        app_version || ''
+      ).run();
+
+      await env.DB.prepare(`
+        INSERT INTO machine_features (hwid, mobile_app, cloud_backup, reports, purchases, expenses, returns_module, suppliers, multi_user, lan_sync)
+        VALUES (?, 1, 1, 1, 1, 1, 1, 1, 1, 1)
+      `).bind(hwid).run();
+    }
+
+    // Save the trial request
+    await env.DB.prepare(`
+      INSERT INTO trial_requests (hwid, phone, shop_name, owner_name, city, app_version, status, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+    `).bind(
+      hwid,
+      phone.trim(),
+      shop_name || '',
+      owner_name || '',
+      city || '',
+      app_version || '',
+      now
+    ).run();
+
+    return jsonResponse({
+      success: true,
+      already_pending: false,
+      message: 'Trial request submitted. Waiting for admin approval.',
+    });
+
+  } catch (err) {
+    console.error('trial-request error:', err);
+    return errorResponse(500, 'Failed to submit trial request: ' + err.message);
+  }
+}

@@ -324,6 +324,96 @@ export async function getStats(env) {
   }
 }
 
+// ── GET /api/admin/trial-requests ────────────────────────────────────────────
+export async function listTrialRequests(request, env) {
+  try {
+    const url    = new URL(request.url);
+    const status = url.searchParams.get('status') || 'pending';
+
+    const result = await env.DB.prepare(
+      `SELECT tr.*
+       FROM trial_requests tr
+       WHERE tr.status = ?
+       ORDER BY tr.created_at DESC
+       LIMIT 100`
+    ).bind(status).all();
+
+    return jsonResponse({ success: true, requests: result.results });
+  } catch (err) {
+    return errorResponse(500, err.message);
+  }
+}
+
+// ── POST /api/admin/trial-requests/:id/approve ────────────────────────────────
+export async function approveTrialRequest(id, env) {
+  try {
+    const req = await env.DB.prepare(
+      'SELECT * FROM trial_requests WHERE id = ?'
+    ).bind(id).first();
+
+    if (!req) return errorResponse(404, 'Trial request not found');
+    if (req.status !== 'pending') {
+      return jsonResponse({ success: false, error: 'Request already processed' });
+    }
+
+    const now    = Date.now();
+    const expiry = now + (7 * 24 * 60 * 60 * 1000); // 7 days
+
+    // Update request status
+    await env.DB.prepare(
+      "UPDATE trial_requests SET status = 'approved', resolved_at = ? WHERE id = ?"
+    ).bind(now, id).run();
+
+    // Grant trial on the machine
+    await env.DB.prepare(
+      "UPDATE machines SET status = 'trial', license_expiry = ?, is_permanent = 0 WHERE hwid = ?"
+    ).bind(expiry, req.hwid).run();
+
+    // Set trial feature flags
+    await env.DB.prepare(`
+      INSERT INTO machine_features (hwid, mobile_app, cloud_backup, reports, purchases, expenses, returns_module, suppliers, multi_user, lan_sync)
+      VALUES (?, 1, 0, 1, 1, 1, 1, 1, 0, 0)
+      ON CONFLICT(hwid) DO UPDATE SET
+        mobile_app=1, cloud_backup=0, reports=1, purchases=1,
+        expenses=1, returns_module=1, suppliers=1, multi_user=0, lan_sync=0
+    `).bind(req.hwid).run();
+
+    await logAction(req.hwid, 'trial', `7-day trial approved via trial request #${id} (expires: ${new Date(expiry).toLocaleDateString('en-PK')})`, env);
+
+    return jsonResponse({
+      success: true,
+      message: '7-day trial granted. App will unlock on next startup.',
+      expiry_date: expiry,
+    });
+  } catch (err) {
+    return errorResponse(500, err.message);
+  }
+}
+
+// ── POST /api/admin/trial-requests/:id/reject ─────────────────────────────────
+export async function rejectTrialRequest(id, env) {
+  try {
+    const req = await env.DB.prepare(
+      'SELECT id, status FROM trial_requests WHERE id = ?'
+    ).bind(id).first();
+
+    if (!req) return errorResponse(404, 'Trial request not found');
+    if (req.status !== 'pending') {
+      return jsonResponse({ success: false, error: 'Request already processed' });
+    }
+
+    const now = Date.now();
+
+    await env.DB.prepare(
+      "UPDATE trial_requests SET status = 'rejected', resolved_at = ? WHERE id = ?"
+    ).bind(now, id).run();
+
+    return jsonResponse({ success: true, message: 'Request rejected.' });
+  } catch (err) {
+    return errorResponse(500, err.message);
+  }
+}
+
 // ── Internal: log an action ───────────────────────────────────────────────────
 async function logAction(hwid, action, detail, env) {
   try {

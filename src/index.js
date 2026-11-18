@@ -25,11 +25,12 @@
 
 import { handleAdminLogin, verifyAdminJWT } from './auth.js';
 import { corsHeaders, withCors, errorResponse, jsonResponse } from './utils.js';
-import { handleVerify, handleRegister, handlePing } from './license.js';
+import { handleVerify, handleRegister, handlePing, handleTrialRequest } from './license.js';
 import {
   listMachines, getMachine, updateMachine, deleteMachine,
   authorizeMachine, revokeMachine, grantTrial,
-  updateFeatures, getMachineLogs, getStats
+  updateFeatures, getMachineLogs, getStats,
+  listTrialRequests, approveTrialRequest, rejectTrialRequest,
 } from './admin.js';
 
 export default {
@@ -53,6 +54,9 @@ export default {
       }
       if (path === '/api/license/ping' && method === 'POST') {
         return withCors(await handlePing(request, env), env);
+      }
+      if (path === '/api/license/trial-request' && method === 'POST') {
+        return withCors(await handleTrialRequest(request, env), env);
       }
 
       // ── Admin Login (no auth needed) ──────────────────────────────────────
@@ -80,6 +84,19 @@ export default {
         // /api/admin/machines
         if (path === '/api/admin/machines' && method === 'GET') {
           return withCors(await listMachines(request, env), env);
+        }
+
+        // /api/admin/trial-requests
+        if (path === '/api/admin/trial-requests' && method === 'GET') {
+          return withCors(await listTrialRequests(request, env), env);
+        }
+
+        const trialReqMatch = path.match(/^\/api\/admin\/trial-requests\/(\d+)\/(approve|reject)$/);
+        if (trialReqMatch && method === 'POST') {
+          const id     = parseInt(trialReqMatch[1]);
+          const action = trialReqMatch[2];
+          if (action === 'approve') return withCors(await approveTrialRequest(id, env), env);
+          if (action === 'reject')  return withCors(await rejectTrialRequest(id, env), env);
         }
 
         // /api/admin/machines/:hwid and sub-routes

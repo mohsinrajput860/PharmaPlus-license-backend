@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS trial_requests (
   hwid        TEXT NOT NULL,
   phone       TEXT NOT NULL,
   shop_name   TEXT DEFAULT '',
+  owner_name  TEXT DEFAULT '',
+  city        TEXT DEFAULT '',
   app_version TEXT DEFAULT '',
   status      TEXT NOT NULL DEFAULT 'pending',   -- pending | approved | rejected
   created_at  INTEGER NOT NULL DEFAULT (unixepoch() * 1000),

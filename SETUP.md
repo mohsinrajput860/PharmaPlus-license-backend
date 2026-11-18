@@ -60,6 +60,7 @@ Should return: `{ "status": "ok" }`
 | POST | /api/license/verify | Verify HWID + get features |
 | POST | /api/license/register | First-time machine registration |
 | POST | /api/license/ping | Heartbeat update |
+| POST | /api/license/trial-request | Submit free trial request (from app) |
 
 ### Admin (requires Bearer JWT)
 | Method | Route | Description |
@@ -69,7 +70,10 @@ Should return: `{ "status": "ok" }`
 | GET | /api/admin/stats | Dashboard statistics |
 | POST | /api/admin/machines/:hwid/authorize | Grant license (body: {days: 30}) |
 | POST | /api/admin/machines/:hwid/revoke | Revoke license |
-| POST | /api/admin/machines/:hwid/trial | Grant 7-day trial |
+| POST | /api/admin/machines/:hwid/trial | Grant 7-day trial directly |
 | PUT | /api/admin/machines/:hwid/features | Toggle features |
 | PUT | /api/admin/machines/:hwid | Edit store info |
 | DELETE | /api/admin/machines/:hwid | Delete record |
+| GET | /api/admin/trial-requests?status=pending | List trial requests |
+| POST | /api/admin/trial-requests/:id/approve | Approve trial request |
+| POST | /api/admin/trial-requests/:id/reject | Reject trial request |
