@@ -175,14 +175,28 @@ export async function handleRegister(request, env) {
 // ── POST /api/license/ping ────────────────────────────────────────────────────
 export async function handlePing(request, env) {
   const body = await parseBody(request);
-  const { hwid, app_version } = body;
+  const { hwid, app_version, backup_email } = body;
 
   if (!hwid) return errorResponse(400, 'HWID required');
 
   try {
     await env.DB.prepare(
-      'UPDATE machines SET last_seen = ?, app_version = COALESCE(?, app_version) WHERE hwid = ?'
-    ).bind(Date.now(), app_version || null, hwid).run();
+      `UPDATE machines SET
+        last_seen   = ?,
+        app_version = COALESCE(?, app_version),
+        backup_email = CASE
+          WHEN ? IS NOT NULL AND ? != '' THEN ?
+          ELSE backup_email
+        END
+       WHERE hwid = ?`
+    ).bind(
+      Date.now(),
+      app_version  || null,
+      backup_email || null,
+      backup_email || null,
+      backup_email || null,
+      hwid
+    ).run();
 
     return jsonResponse({ success: true });
   } catch (err) {
