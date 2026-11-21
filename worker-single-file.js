@@ -98,6 +98,8 @@ async function handleAdminLogin(request, env) {
   const now = Math.floor(Date.now() / 1000);
   const token = await signJWT({ sub: email, role: 'admin', iat: now, exp: now + 28800 }, env.JWT_SECRET);
   const tokenHash = await sha256(token);
+  // Purane expire + revoked sessions delete karo (cleanup on login)
+  await env.DB.prepare('DELETE FROM admin_sessions WHERE expires_at < ? OR revoked = 1').bind(Date.now()).run();
   await env.DB.prepare('INSERT INTO admin_sessions (token_hash, created_at, expires_at) VALUES (?, ?, ?)').bind(tokenHash, Date.now(), (now + 28800) * 1000).run();
   return jsonResponse({ success: true, token, expiresAt: (now + 28800) * 1000, adminEmail: email });
 }
@@ -180,16 +182,26 @@ async function logAction(hwid, action, detail, env, source = 'admin') {
 }
 
 async function listMachines(request, env) {
-  const url = new URL(request.url);
-  const search = url.searchParams.get('search') || '';
-  const status = url.searchParams.get('status') || '';
-  const limit  = Math.min(parseInt(url.searchParams.get('limit') || '100'), 200);
-  const offset = parseInt(url.searchParams.get('offset') || '0');
+  const url          = new URL(request.url);
+  const search       = url.searchParams.get('search') || '';
+  const status       = url.searchParams.get('status') || '';
+  const expiringSoon = url.searchParams.get('expiring_soon') === '1';
+  const limit        = Math.min(parseInt(url.searchParams.get('limit') || '100'), 200);
+  const offset       = parseInt(url.searchParams.get('offset') || '0');
   let q = 'SELECT m.*, mf.mobile_app, mf.cloud_backup, mf.reports, mf.purchases, mf.expenses, mf.returns_module, mf.suppliers, mf.multi_user, mf.lan_sync FROM machines m LEFT JOIN machine_features mf ON m.hwid=mf.hwid WHERE 1=1';
   const p = [];
   if (search) { q += ' AND (m.shop_name LIKE ? OR m.hwid LIKE ? OR m.owner_name LIKE ? OR m.city LIKE ?)'; const s=`%${search}%`; p.push(s,s,s,s); }
   if (status) { q += ' AND m.status=?'; p.push(status); }
-  q += ' ORDER BY m.created_at DESC LIMIT ? OFFSET ?'; p.push(limit, offset);
+  if (expiringSoon) {
+    const now = Date.now();
+    const in7days = now + 7 * 24 * 60 * 60 * 1000;
+    q += ' AND m.is_permanent=0 AND m.license_expiry IS NOT NULL AND m.license_expiry BETWEEN ? AND ?';
+    p.push(now, in7days);
+    q += ' ORDER BY m.license_expiry ASC LIMIT ? OFFSET ?';
+  } else {
+    q += ' ORDER BY m.created_at DESC LIMIT ? OFFSET ?';
+  }
+  p.push(limit, offset);
   const result = await env.DB.prepare(q).bind(...p).all();
   let cq = 'SELECT COUNT(*) as total FROM machines WHERE 1=1'; const cp = [];
   if (search) { cq += ' AND (shop_name LIKE ? OR hwid LIKE ? OR owner_name LIKE ? OR city LIKE ?)'; const s=`%${search}%`; cp.push(s,s,s,s); }

@@ -92,6 +92,11 @@ export async function handleAdminLogin(request, env) {
 
   const token = await signJWT(payload, secret);
 
+  // Purane expire + revoked sessions delete karo (cleanup on login)
+  await env.DB.prepare(
+    'DELETE FROM admin_sessions WHERE expires_at < ? OR revoked = 1'
+  ).bind(Date.now()).run();
+
   // Store token hash in DB for revocation support
   const tokenHash = await sha256(token);
   await env.DB.prepare(

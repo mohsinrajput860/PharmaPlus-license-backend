@@ -7,11 +7,12 @@ import { jsonResponse, errorResponse, parseBody, defaultFeatures } from './utils
 // ── GET /api/admin/machines ───────────────────────────────────────────────────
 export async function listMachines(request, env) {
   try {
-    const url    = new URL(request.url);
-    const search = url.searchParams.get('search') || '';
-    const status = url.searchParams.get('status') || '';
-    const limit  = Math.min(parseInt(url.searchParams.get('limit') || '100'), 200);
-    const offset = parseInt(url.searchParams.get('offset') || '0');
+    const url          = new URL(request.url);
+    const search       = url.searchParams.get('search') || '';
+    const status       = url.searchParams.get('status') || '';
+    const expiringSoon = url.searchParams.get('expiring_soon') === '1';
+    const limit        = Math.min(parseInt(url.searchParams.get('limit') || '100'), 200);
+    const offset       = parseInt(url.searchParams.get('offset') || '0');
 
     let query = `
       SELECT m.*, mf.mobile_app, mf.cloud_backup, mf.reports, mf.purchases,
@@ -31,8 +32,16 @@ export async function listMachines(request, env) {
       query += ` AND m.status = ?`;
       params.push(status);
     }
-
-    query += ` ORDER BY m.created_at DESC LIMIT ? OFFSET ?`;
+    // expiring_soon=1 — active, non-permanent, expiry within next 7 days
+    if (expiringSoon) {
+      const now     = Date.now();
+      const in7days = now + 7 * 24 * 60 * 60 * 1000;
+      query += ` AND m.is_permanent = 0 AND m.license_expiry IS NOT NULL AND m.license_expiry BETWEEN ? AND ?`;
+      params.push(now, in7days);
+      query += ` ORDER BY m.license_expiry ASC LIMIT ? OFFSET ?`;
+    } else {
+      query += ` ORDER BY m.created_at DESC LIMIT ? OFFSET ?`;
+    }
     params.push(limit, offset);
 
     const result = await env.DB.prepare(query).bind(...params).all();
@@ -274,7 +283,9 @@ export async function getStats(env) {
       env.DB.prepare("SELECT COUNT(*) as c FROM machines").first(),
       env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'active'").first(),
       env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'trial'").first(),
-      env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'inactive' OR (license_expiry IS NOT NULL AND license_expiry < ?)").bind(now).first(),
+      // expired = machines jo pehle licensed theen lekin ab expiry guzar gayi
+      // sirf inactive + license_expiry set hone wali — kabhi approve na hone wali (NULL expiry) exclude
+      env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'inactive' AND license_expiry IS NOT NULL AND license_expiry < ?").bind(now).first(),
       env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'revoked'").first(),
       env.DB.prepare("SELECT COUNT(*) as c FROM machines WHERE status = 'inactive'").first(),
       // Expiring in next 7 days
